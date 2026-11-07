@@ -32,6 +32,14 @@ jobs:
           $url = "https://github.com/LLVMParty/remill-template/releases/download/llvm-prebuild/llvm-19.1.6-install.7z"
           curl.exe -L -o llvm.7z $url
           7z x llvm.7z -ollvm-install
+
+          # 关键：禁用有问题的 llvm-mt（缺少 libxml2）
+          $llvmMt = Join-Path $PWD "llvm-install\bin\llvm-mt.exe"
+          if (Test-Path $llvmMt) {
+            Rename-Item $llvmMt "llvm-mt.exe.disabled"
+            Write-Host "Disabled broken llvm-mt.exe"
+          }
+
           $llvm = (Resolve-Path ".\llvm-install").Path -replace '\\', '/'
           echo "LLVM_PREFIX=$llvm" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "LLVM_PREFIX=$llvm"
@@ -43,7 +51,6 @@ jobs:
                 Sort-Object FullName -Descending |
                 Select-Object -First 1 -ExpandProperty FullName
           if (-not $mt) { throw "mt.exe not found" }
-          # 路径里有空格，后面传参时注意加引号
           echo "CMAKE_MT=$mt" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "CMAKE_MT=$mt"
 
