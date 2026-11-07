@@ -21,24 +21,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 进入 Visual Studio 开发者环境（官方 README 要求）
       - name: Visual Studio Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1
 
-      # 安装 Ninja
       - name: Install Ninja
         run: choco install ninja -y
 
-      # 下载预编译 LLVM（避免在 runner 上编译 LLVM 导致 OOM / 超时）
       - name: Download prebuilt LLVM
         run: |
           $url = "https://github.com/LLVMParty/remill-template/releases/download/llvm-prebuild/llvm-19.1.6-install.7z"
           curl.exe -L -o llvm.7z $url
           7z x llvm.7z -ollvm-install
-          echo "LLVM_PREFIX=$PWD\llvm-install" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "LLVM_PREFIX=$PWD\llvm-install"
+          $llvm = (Resolve-Path ".\llvm-install").Path -replace '\\', '/'
+          echo "LLVM_PREFIX=$llvm" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "LLVM_PREFIX=$llvm"
 
-      # 找到 Windows SDK 的 mt.exe（避免 llvm-mt 缺少 libxml2 报错）
       - name: Find Windows SDK mt.exe
         run: |
           $mt = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter mt.exe |
@@ -46,47 +43,57 @@ jobs:
                 Sort-Object FullName -Descending |
                 Select-Object -First 1 -ExpandProperty FullName
           if (-not $mt) { throw "mt.exe not found" }
+          # 路径里有空格，后面传参时注意加引号
           echo "CMAKE_MT=$mt" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "CMAKE_MT=$mt"
 
-      # 构建 dependencies（使用外部 LLVM）
       - name: Build dependencies
         run: |
+          $llvm = ($env:LLVM_PREFIX -replace '\\', '/')
+          Write-Host "Using LLVM_PREFIX: $llvm"
+
           cmake -G Ninja `
             -S dependencies `
             -B dependencies/build `
             -DUSE_EXTERNAL_LLVM=ON `
-            "-DCMAKE_PREFIX_PATH=$env:LLVM_PREFIX" `
+            "-DCMAKE_PREFIX_PATH=$llvm" `
             -DCMAKE_C_COMPILER=clang-cl `
             -DCMAKE_CXX_COMPILER=clang-cl `
             "-DCMAKE_MT=$env:CMAKE_MT" `
             -DCMAKE_BUILD_TYPE=Release
+
           cmake --build dependencies/build
 
-      # 构建 remill
       - name: Build remill
         run: |
+          $llvm  = ($env:LLVM_PREFIX -replace '\\', '/')
+          $deps  = ((Join-Path $PWD 'dependencies\install') -replace '\\', '/')
+          $inst  = ((Join-Path $PWD 'install') -replace '\\', '/')
+          $prefix = "$llvm;$deps"
+
+          Write-Host "CMAKE_PREFIX_PATH=$prefix"
+          Write-Host "CMAKE_INSTALL_PREFIX=$inst"
+
           cmake -G Ninja `
             -B build `
-            "-DCMAKE_PREFIX_PATH=$env:LLVM_PREFIX;$PWD\dependencies\install" `
+            "-DCMAKE_PREFIX_PATH=$prefix" `
             -DCMAKE_C_COMPILER=clang-cl `
             -DCMAKE_CXX_COMPILER=clang-cl `
             "-DCMAKE_MT=$env:CMAKE_MT" `
             -DCMAKE_BUILD_TYPE=RelWithDebInfo `
-            "-DCMAKE_INSTALL_PREFIX=$PWD\install"
+            "-DCMAKE_INSTALL_PREFIX=$inst"
+
           cmake --build build
 
-      # 安装
       - name: Install remill
         run: cmake --install build
 
-      # 冒烟测试
       - name: Smoke test
         run: |
           $lift = Get-ChildItem -Path install\bin -Filter "remill-lift-*" -ErrorAction SilentlyContinue |
                   Select-Object -First 1
           if (-not $lift) {
-            Write-Host "Available files in install:"
+            Write-Host "=== install tree ==="
             Get-ChildItem -Path install -Recurse | Select-Object FullName
             throw "remill-lift executable not found"
           }
@@ -94,12 +101,10 @@ jobs:
           & $lift.FullName --arch amd64 --ir_out CONOUT$ --bytes c704ba01000000
           & $lift.FullName --arch aarch64 --ir_out CONOUT$ --address 0x400544 --bytes FD7BBFA90000009000601891FD030091B7FFFF97E0031F2AFD7BC1A8C0035FD6
 
-      # 上传产物（可选）
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: remill-windows
-          path: |
-            install/
+          path: install/
           retention-days: 7
           if-no-files-found: warn
