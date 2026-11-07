@@ -25,17 +25,29 @@ jobs:
       - name: Visual Studio Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1
 
-      # 安装 Ninja（Windows runner 默认没有）
+      # 安装 Ninja
       - name: Install Ninja
         run: choco install ninja -y
 
-      # 下载预编译 LLVM（强烈推荐，自己编 LLVM 在 runner 上很容易 OOM / 磁盘不够）
+      # 下载预编译 LLVM（避免在 runner 上编译 LLVM 导致 OOM / 超时）
       - name: Download prebuilt LLVM
         run: |
           $url = "https://github.com/LLVMParty/remill-template/releases/download/llvm-prebuild/llvm-19.1.6-install.7z"
           curl.exe -L -o llvm.7z $url
           7z x llvm.7z -ollvm-install
           echo "LLVM_PREFIX=$PWD\llvm-install" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "LLVM_PREFIX=$PWD\llvm-install"
+
+      # 找到 Windows SDK 的 mt.exe（避免 llvm-mt 缺少 libxml2 报错）
+      - name: Find Windows SDK mt.exe
+        run: |
+          $mt = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter mt.exe |
+                Where-Object { $_.FullName -match '\\x64\\mt\.exe$' } |
+                Sort-Object FullName -Descending |
+                Select-Object -First 1 -ExpandProperty FullName
+          if (-not $mt) { throw "mt.exe not found" }
+          echo "CMAKE_MT=$mt" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "CMAKE_MT=$mt"
 
       # 构建 dependencies（使用外部 LLVM）
       - name: Build dependencies
@@ -47,6 +59,7 @@ jobs:
             "-DCMAKE_PREFIX_PATH=$env:LLVM_PREFIX" `
             -DCMAKE_C_COMPILER=clang-cl `
             -DCMAKE_CXX_COMPILER=clang-cl `
+            "-DCMAKE_MT=$env:CMAKE_MT" `
             -DCMAKE_BUILD_TYPE=Release
           cmake --build dependencies/build
 
@@ -58,6 +71,7 @@ jobs:
             "-DCMAKE_PREFIX_PATH=$env:LLVM_PREFIX;$PWD\dependencies\install" `
             -DCMAKE_C_COMPILER=clang-cl `
             -DCMAKE_CXX_COMPILER=clang-cl `
+            "-DCMAKE_MT=$env:CMAKE_MT" `
             -DCMAKE_BUILD_TYPE=RelWithDebInfo `
             "-DCMAKE_INSTALL_PREFIX=$PWD\install"
           cmake --build build
@@ -66,15 +80,21 @@ jobs:
       - name: Install remill
         run: cmake --install build
 
-      # 简单冒烟测试
+      # 冒烟测试
       - name: Smoke test
         run: |
-          $lift = Get-ChildItem -Path install\bin -Filter "remill-lift-*" | Select-Object -First 1
-          if (-not $lift) { throw "remill-lift executable not found" }
+          $lift = Get-ChildItem -Path install\bin -Filter "remill-lift-*" -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+          if (-not $lift) {
+            Write-Host "Available files in install:"
+            Get-ChildItem -Path install -Recurse | Select-Object FullName
+            throw "remill-lift executable not found"
+          }
+          Write-Host "Using: $($lift.FullName)"
           & $lift.FullName --arch amd64 --ir_out CONOUT$ --bytes c704ba01000000
           & $lift.FullName --arch aarch64 --ir_out CONOUT$ --address 0x400544 --bytes FD7BBFA90000009000601891FD030091B7FFFF97E0031F2AFD7BC1A8C0035FD6
 
-      # 可选：上传产物
+      # 上传产物（可选）
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -82,3 +102,4 @@ jobs:
           path: |
             install/
           retention-days: 7
+          if-no-files-found: warn
